@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/ybotet/pz5_https_sql/shared/models"
+	"github.com/ybotet/pz6_csrf_xss/shared/models"
 )
 
 type TaskRepository interface {

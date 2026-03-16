@@ -10,10 +10,10 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/gorilla/mux"
-	"github.com/ybotet/pz5_https_sql/services/auth/internal/auth"
-	grpcserver "github.com/ybotet/pz5_https_sql/services/auth/internal/grpc"
-	"github.com/ybotet/pz5_https_sql/shared/logger"
-	"github.com/ybotet/pz5_https_sql/shared/middleware"
+	"github.com/ybotet/pz6_csrf_xss/services/auth/internal/auth"
+	grpcserver "github.com/ybotet/pz6_csrf_xss/services/auth/internal/grpc"
+	"github.com/ybotet/pz6_csrf_xss/shared/logger"
+	"github.com/ybotet/pz6_csrf_xss/shared/middleware"
 )
 
 func main() {

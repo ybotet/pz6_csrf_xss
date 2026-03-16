@@ -10,7 +10,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	authpb "github.com/ybotet/pz5_https_sql/gen/proto/auth"
+	authpb "github.com/ybotet/pz6_csrf_xss/gen/proto/auth"
 )
 
 type AuthMiddleware struct {
