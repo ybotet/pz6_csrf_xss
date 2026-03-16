@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -9,66 +11,101 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/gorilla/mux"
 	"github.com/ybotet/pz6_csrf_xss/services/auth/internal/auth"
 	grpcserver "github.com/ybotet/pz6_csrf_xss/services/auth/internal/grpc"
+	httpserver "github.com/ybotet/pz6_csrf_xss/services/auth/internal/http"
 	"github.com/ybotet/pz6_csrf_xss/shared/logger"
-	"github.com/ybotet/pz6_csrf_xss/shared/middleware"
 )
 
 func main() {
-
+    // 1. Inicializar logger (el de tu proyecto)
     log := logger.New(logger.Config{
         ServiceName: "auth",
         Environment: "development",
         LogLevel:    "debug",
         JSONFormat:  true,
     })
-    
-    // Router
-    r := mux.NewRouter()
-    
-    // Middlewares в ПРАВИЛЬНОМ порядке
-    r.Use(middleware.RequestID)
-    r.Use(middleware.Logging(log))
 
-    port := os.Getenv("AUTH_GRPC_PORT")
-    if port == "" {
-        port = "50051"
-        log.Printf("AUTH_GRPC_PORT не настроен, используется порт по умолчанию: %s", port)
+    // 2. Configuración desde variables de entorno
+    grpcPort := getEnv("AUTH_GRPC_PORT", "50051")
+    httpPort := getEnv("AUTH_HTTP_PORT", "8081")
+    jwtSecret := getEnv("JWT_SECRET", "your-secret-key-change-in-production")
+
+    if jwtSecret == "your-secret-key-change-in-production" {
+        log.Warn("JWT_SECRET no configurado, usando clave por defecto (¡NO USAR EN PRODUCCIÓN!)")
     }
 
-    jwtSecret := os.Getenv("JWT_SECRET")
-    if jwtSecret == "" {
-        jwtSecret = "your-secret-key-change-in-production"
-        log.Printf("JWT_SECRET не настроен, используется ключ по умолчанию (НЕ ИСПОЛЬЗОВАТЬ В ПРОДАКШЕНЕ)")
-    }
-
-    lis, err := net.Listen("tcp", ":"+port)
-    if err != nil {
-        log.Fatalf("Ошибка прослушивания порта %s: %v", port, err)
-    }
-
-    s := grpc.NewServer()
+    // 3. Crear servicio auth (compartido entre HTTP y gRPC)
     authService := auth.NewService(jwtSecret)
-    grpcserver.Register(s, authService)
 
-    // Graceful shutdown
+    // 4. Crear canales para errores de servidores
+    errChan := make(chan error, 2)
+
+    // 5. Iniciar servidor HTTP
+    httpSrv := httpserver.NewServer(authService, log, httpPort)
     go func() {
-        sigChan := make(chan os.Signal, 1)
-        signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-        <-sigChan
-        log.Println("Выключение gRPC сервера...")
-        s.GracefulStop()
+        log.WithField("port", httpPort).Info("📡 Iniciando servidor HTTP")
+        if err := httpSrv.Start(); err != nil && err != http.ErrServerClosed {
+            errChan <- err
+        }
     }()
 
-    log.Printf("gRPC сервер Auth слушает порт %s", port)
-    
-    // Генерация тестового токена
-    testToken, _ := authService.GenerateToken("тестовый_пользователь", 24*time.Hour)
-    log.Printf("Тестовый токен (действителен 24ч): %s", testToken)
-    
-    if err := s.Serve(lis); err != nil {
-        log.Fatalf("Ошибка при обслуживании: %v", err)
+    // 6. Iniciar servidor gRPC
+    lis, err := net.Listen("tcp", ":"+grpcPort)
+    if err != nil {
+        log.WithError(err).Fatalf("Error escuchando puerto %s", grpcPort)
     }
+
+    grpcSrv := grpc.NewServer()
+    grpcserver.Register(grpcSrv, authService)
+
+    go func() {
+        log.WithField("port", grpcPort).Info("Iniciando servidor gRPC")
+        if err := grpcSrv.Serve(lis); err != nil {
+            errChan <- err
+        }
+    }()
+
+    // 7. Generar token de prueba
+    testToken, _ := authService.GenerateToken("test_user", 24*time.Hour)
+    log.WithField("token", testToken).Info(" Token de prueba generado (válido 24h)")
+    log.WithFields(map[string]interface{}{
+        "http_port": httpPort,
+        "grpc_port": grpcPort,
+    }).Info("Servicios auth iniciados correctamente")
+
+    // 8. Graceful shutdown
+    sigChan := make(chan os.Signal, 1)
+    signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+    select {
+    case <-sigChan:
+        log.Info("Señal de terminación recibida")
+    case err := <-errChan:
+        log.WithError(err).Error("Error en servidor")
+    }
+
+    // 9. Apagar servidores gracefulmente
+    log.Info("Apagando servidores...")
+
+    // Apagar HTTP
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+    
+    if err := httpSrv.Shutdown(ctx); err != nil {
+        log.WithError(err).Error("Error apagando HTTP")
+    }
+
+    // Apagar gRPC
+    grpcSrv.GracefulStop()
+    
+    log.Info("Servidores apagados correctamente")
+}
+
+// Helper para variables de entorno
+func getEnv(key, defaultValue string) string {
+    if value := os.Getenv(key); value != "" {
+        return value
+    }
+    return defaultValue
 }

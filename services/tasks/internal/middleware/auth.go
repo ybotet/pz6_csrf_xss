@@ -2,89 +2,67 @@ package middleware
 
 import (
 	"context"
-	"log"
 	"net/http"
 	"strings"
 	"time"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
+	"github.com/sirupsen/logrus"
 
 	authpb "github.com/ybotet/pz6_csrf_xss/gen/proto/auth"
 )
 
+type contextKey string
+
+const (
+    UserIDKey contextKey = "user_id"
+)
+
+// AuthMiddleware autentica por JWT (del header Authorization)
 type AuthMiddleware struct {
     authClient authpb.AuthServiceClient
+    logger     *logrus.Logger
 }
 
-func NewAuthMiddleware(client authpb.AuthServiceClient) *AuthMiddleware {
+func NewAuthMiddleware(authClient authpb.AuthServiceClient) *AuthMiddleware {
     return &AuthMiddleware{
-        authClient: client,
+        authClient: authClient,
     }
 }
 
+// Authenticate valida el token JWT
 func (m *AuthMiddleware) Authenticate(next http.HandlerFunc) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
+        // Obtener token del header Authorization
         authHeader := r.Header.Get("Authorization")
-        if authHeader == "" {
-            log.Printf("Токен не предоставлен")
-            http.Error(w, "Токен не предоставлен", http.StatusUnauthorized)
+        if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+            http.Error(w, `{"error":"Token no proporcionado"}`, http.StatusUnauthorized)
             return
         }
 
-        parts := strings.Split(authHeader, " ")
-        if len(parts) != 2 || parts[0] != "Bearer" {
-            log.Printf("Неверный формат токена")
-            http.Error(w, "Неверный формат токена", http.StatusUnauthorized)
-            return
-        }
-        token := parts[1]
+        token := strings.TrimPrefix(authHeader, "Bearer ")
 
-        // Crear contexto con deadline
-        ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+        // Verificar token con auth service
+        ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
         defer cancel()
 
-        log.Printf("Вызов gRPC Verify с дедлайном 2с")
-
-        // Llamar a Auth service via gRPC
         resp, err := m.authClient.Verify(ctx, &authpb.VerifyRequest{
             Token: token,
         })
-
-        if err != nil {
-            // Mapear errores gRPC a HTTP
-            st, ok := status.FromError(err)
-            if !ok {
-                log.Printf("Внутренняя ошибка сервера: %v", err)
-                http.Error(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
-                return
-            }
-
-            log.Printf("Ошибка gRPC: %v", st.Message())
-            
-            switch st.Code() {
-            case codes.Unauthenticated:
-                http.Error(w, "Недействительный токен", http.StatusUnauthorized)
-            case codes.DeadlineExceeded:
-                http.Error(w, "Таймаут при проверке аутентификации", http.StatusGatewayTimeout)
-            case codes.Unavailable:
-                http.Error(w, "Сервис аутентификации недоступен", http.StatusServiceUnavailable)
-            default:
-                http.Error(w, "Ошибка аутентификации", http.StatusInternalServerError)
-            }
+        if err != nil || !resp.Valid {
+            http.Error(w, `{"error":"Token inválido"}`, http.StatusUnauthorized)
             return
         }
 
-        if !resp.Valid {
-            log.Printf("Недействительный токен (невалидный ответ)")
-            http.Error(w, "Недействительный токен", http.StatusUnauthorized)
-            return
-        }
-
-        log.Printf("Токен действителен для пользователя: %s", resp.Subject)
-        
-        // Añadir subject al contexto
-        ctx = context.WithValue(r.Context(), "user", resp.Subject)
-        next.ServeHTTP(w, r.WithContext(ctx))
+        // Añadir user ID al contexto
+        ctx = context.WithValue(r.Context(), UserIDKey, resp.Subject)
+        next(w, r.WithContext(ctx))
     }
+}
+
+// GetUserID obtiene el user ID del contexto
+func GetUserID(ctx context.Context) string {
+    if id, ok := ctx.Value(UserIDKey).(string); ok {
+        return id
+    }
+    return ""
 }

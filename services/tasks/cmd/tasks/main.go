@@ -1,17 +1,17 @@
 package main
 
 import (
-    "net/http"
-    "os"
+	"net/http"
+	"os"
 
-    "github.com/gorilla/mux"
-    "github.com/ybotet/pz6_csrf_xss/services/tasks/internal/clients"
-    "github.com/ybotet/pz6_csrf_xss/services/tasks/internal/handlers"
-    "github.com/ybotet/pz6_csrf_xss/services/tasks/internal/repository"
+	"github.com/gorilla/mux"
+	"github.com/ybotet/pz6_csrf_xss/services/tasks/internal/clients"
+	"github.com/ybotet/pz6_csrf_xss/services/tasks/internal/handlers"
+	"github.com/ybotet/pz6_csrf_xss/services/tasks/internal/repository"
 
-    internalMiddleware "github.com/ybotet/pz6_csrf_xss/services/tasks/internal/middleware"
-    "github.com/ybotet/pz6_csrf_xss/shared/logger"
-    "github.com/ybotet/pz6_csrf_xss/shared/middleware"
+	internalMiddleware "github.com/ybotet/pz6_csrf_xss/services/tasks/internal/middleware"
+	"github.com/ybotet/pz6_csrf_xss/shared/logger"
+	"github.com/ybotet/pz6_csrf_xss/shared/middleware"
 )
 
 func main() {
@@ -45,9 +45,10 @@ func main() {
     // Router
     r := mux.NewRouter()
 
-    // Middleware
+    // Middlewares GLOBALES (en orden correcto)
     r.Use(middleware.RequestID)
     r.Use(middleware.Logging(log))
+    r.Use(internalMiddleware.SecurityHeadersMiddleware) // <-- NUEVO
 
     // Conectar a Auth service
     authClient, err := clients.NewAuthClient(authAddr)
@@ -56,20 +57,29 @@ func main() {
     }
     defer authClient.Close()
 
-    // Middleware de autenticaci?n
+    // Middleware de autenticación (existente)
     authMiddleware := internalMiddleware.NewAuthMiddleware(authClient.GetClient())
     taskHandler := handlers.NewTaskHandler(taskRepo)
 
-    // Rutas
+    // Health check (público)
     r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
         w.WriteHeader(http.StatusOK)
         w.Write([]byte("OK"))
     }).Methods("GET")
 
-    r.HandleFunc("/v1/tasks", authMiddleware.Authenticate(taskHandler.GetTasks)).Methods("GET")
-    r.HandleFunc("/v1/tasks", authMiddleware.Authenticate(taskHandler.CreateTask)).Methods("POST")
-    r.HandleFunc("/v1/tasks/search/vulnerable", authMiddleware.Authenticate(taskHandler.SearchTasksVulnerable)).Methods("GET")
-    r.HandleFunc("/v1/tasks/search", authMiddleware.Authenticate(taskHandler.SearchTasks)).Methods("GET")
+    // ===== RUTAS PROTEGIDAS =====
+    // GET /tasks - Solo autenticación (no requiere CSRF)
+    r.HandleFunc("/v1/tasks", 
+        authMiddleware.Authenticate(taskHandler.GetTasks)).Methods("GET")
+    
+    // POST /tasks - Autenticación + CSRF
+    r.HandleFunc("/v1/tasks", 
+        authMiddleware.Authenticate(internalMiddleware.CSRFMiddleware(taskHandler.CreateTask))).Methods("POST")
+
+    r.HandleFunc("/v1/tasks/search/vulnerable", 
+        authMiddleware.Authenticate(taskHandler.SearchTasksVulnerable)).Methods("GET")
+    r.HandleFunc("/v1/tasks/search", 
+        authMiddleware.Authenticate(taskHandler.SearchTasks)).Methods("GET")
 
     log.Printf("Servidor Tasks escuchando en puerto %s", tasksPort)
     log.Fatal(http.ListenAndServe(":"+tasksPort, r))
